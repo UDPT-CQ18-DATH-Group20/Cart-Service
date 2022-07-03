@@ -1,38 +1,44 @@
 var mongoose = require("mongoose");
 var Cart = require("../models/cart");
-const { check, validationResult } = require("express-validator");
+const { query, body, validationResult } = require("express-validator");
+const queue = require("../services/message_queue");
+
+queue.start();
+
+const CUSTOMER_TYPE = 1;
 
 const myValidationResult = validationResult.withDefaults({
   formatter: (error) => {
-    return {
-      message: error.msg,
-    };
+    return error.msg;
   },
 });
 
-exports.validateUserId = [
-  check("user_id", "User Id must be alphanumeric and 24 in length!")
-    .trim()
-    .isLength({ min: 24, max: 24 })
-    .isAlphanumeric(),
+exports.validateUser = [
+  query("user_id").isMongoId(),
   function (req, res, next) {
     const errors = myValidationResult(req);
 
     if (!errors.isEmpty()) {
-      return res.status(400).send("User id isn't valid!");
-    } else next();
+      return res.status(400).send("Account id isn't valid!");
+    }
+
+    if (req.query.user_type != CUSTOMER_TYPE) {
+      return res.status(400).send("User don't have the authorization!");
+    }
+
+    next();
   },
 ];
 
 exports.getCart = function (req, res, next) {
-  Cart.findOne({ user_id: req.params.user_id })
+  Cart.findOne({ user_id: req.query.user_id })
     .select({
       _id: 0,
       user_id: 0,
     })
     .exec(function (err, cart) {
       if (err) {
-        next(err);
+        return next(err);
       }
 
       if (!cart) {
@@ -44,84 +50,63 @@ exports.getCart = function (req, res, next) {
 };
 
 exports.createCart = function (req, res, next) {
-  let userId = req.params.user_id;
-  if (Cart.isCustomerExist(userId, next)) {
-    return res.status(400).send("User already has a cart!");
-  }
+  Cart.countDocuments({ user_id: req.query.user_id }, function (err, count) {
+    if (err) return next(err);
+    if (count > 0) {
+      console.log(count);
+      return res.status(400).send("User already has a cart!");
+    }
+    cart = new Cart();
+    cart.user_id = req.query.user_id;
 
-  cart = new Cart();
-  cart.user_id = userId;
-
-  cart
-    .save()
-    .then(() => res.send("Cart has been created for user."))
-    .catch(next);
+    cart
+      .save()
+      .then(() => res.send("Cart has been created for user."))
+      .catch(next);
+  });
 };
 
-exports.addItem = [
-  check("goods_id", "Goods Id must be alphanumeric and 24 in length!")
-    .trim()
-    .isLength({ min: 24, max: 24 })
-    .isAlphanumeric(),
-  check("goods_name", "Goods name required!")
-    .trim()
-    .isLength({ min: 1 })
-    .escape(),
-  check("quantity", "quantity must be an integer above 0!")
-    .trim()
-    .isInt({ min: 1 })
-    .toInt(),
-  check("price", "price must be equal to greater then 0")
-    .trim()
-    .isFloat({ min: 0 })
-    .toFloat(),
-  function (req, res, next) {
-    const errors = myValidationResult(req);
+exports.addItem = async function (goods, quantity, userId) {
+  var cart;
+  try {
+    cart = await Cart.findOne({ user_id: userId }).exec();
+  } catch (e) {
+    console.log(e.message);
+    return false;
+  }
 
-    if (!errors.isEmpty()) {
-      return res.status(400).json(errors.mapped());
-    }
+  if (!cart) {
+    console.log("Cart of user not found!");
+  }
 
-    let userId = req.params.user_id;
-    let goodsID = req.body.goods_id;
-    let goodsName = req.body.goods_name;
-    let quantity = req.body.quantity;
-    let price = req.body.price;
+  var cart_item = cart.getItem(goods._id);
+  if (!cart_item) {
+    var item = goods;
+    item.goods_id = goods._id;
+    item.quanity = quantity;
+    item.sum_amount = goods.price * quantity;
+    delete item._id;
+    delete item._price;
 
-    Cart.findOne({ user_id: userId }, function (err, cart) {
-      if (err) next(err);
+    cart.items.push(goods);
+  } else {
+    cart_item.quantity = cart_item.quantity + quantity;
+    cart_item.sum_amount = goods.price * cart_item.quantity;
+  }
 
-      if (!cart) {
-        return res.status(404).send("Cart of user not found!");
-      }
+  try {
+    await cart.save();
+  } catch (e) {
+    console.log(e.message);
+    return false;
+  }
 
-      let item = cart.getItem(goodsID);
-      if (!item) {
-        item = {
-          goods_id: goodsID,
-          goods_name: goodsName,
-          sum_amount: price * quantity,
-        };
-
-        cart.items.push(item);
-      } else {
-        item.quantity += quantity;
-        item.sum_amount = price * item.quantity;
-      }
-
-      cart
-        .save()
-        .then(() => res.send("Add item successfull"))
-        .catch(function (error) {
-          res.status(500).send(error.message);
-        });
-    });
-  },
-];
+  return true;
+};
 
 exports.emptyCart = function (req, res, next) {
-  Cart.findOne({ user_id: req.params.user_id }, function (err, cart) {
-    if (err) next(err);
+  Cart.findOne({ user_id: req.query.user_id }, function (err, cart) {
+    if (err) return next(err);
 
     cart.items = [];
     cart
@@ -132,3 +117,25 @@ exports.emptyCart = function (req, res, next) {
       });
   });
 };
+
+exports.validateAndSanitizeItem = [
+  body("goods_id", "Goods Id must be alphanumeric and 24 in length!")
+    .trim()
+    .isLength({ min: 24, max: 24 })
+    .isAlphanumeric(),
+  body("goods_name", "Goods name required!").trim().isEmpty().escape(),
+  body("quantity", "Quantity must be an integer above 0!")
+    .isInt({ min: 1 })
+    .toInt(),
+  body("price", "Price must be equal to greater then 0!")
+    .isFloat({ min: 0 })
+    .toFloat(),
+  function (req, res, next) {
+    const errors = myValidationResult(req);
+
+    if (!errors.isEmpty()) {
+      return res.status(400).json(errors.mapped());
+    }
+    next();
+  },
+];
