@@ -23,7 +23,7 @@ exports.validateUser = [
     }
 
     if (req.query.user_type != CUSTOMER_TYPE) {
-      return res.status(400).send("User don't have the authorization!");
+      return res.status(401).send("User don't have the authorization!");
     }
 
     next();
@@ -53,7 +53,6 @@ exports.createCart = function (req, res, next) {
   Cart.countDocuments({ user_id: req.query.user_id }, function (err, count) {
     if (err) return next(err);
     if (count > 0) {
-      console.log(count);
       return res.status(400).send("User already has a cart!");
     }
     cart = new Cart();
@@ -76,7 +75,7 @@ exports.addItem = async function (goods, quantity, userId) {
   }
 
   if (!cart) {
-    console.log("Cart of user not found!");
+    return console.log("Cart of user not found!");
   }
 
   var cart_item = cart.getItem(goods._id);
@@ -107,6 +106,10 @@ exports.addItem = async function (goods, quantity, userId) {
 exports.emptyCart = function (req, res, next) {
   Cart.findOne({ user_id: req.query.user_id }, function (err, cart) {
     if (err) return next(err);
+
+    if (!cart) {
+      return res.status(404).send("Cart of user not found!");
+    }
 
     cart.items = [];
     cart

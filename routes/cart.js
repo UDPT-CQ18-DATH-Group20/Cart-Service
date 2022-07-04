@@ -8,6 +8,6 @@ router.use(auth);
 router.use(cartController.validateUser);
 router.post("/", cartController.createCart);
 router.get("/", cartController.getCart);
-router.put("/:user_id/empty-cart", cartController.emptyCart);
+router.put("/empty-cart", cartController.emptyCart);
 
 module.exports = router;
